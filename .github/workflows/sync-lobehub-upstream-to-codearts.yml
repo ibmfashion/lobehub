@@ -1,14 +1,18 @@
 name: sync-lobehub-upstream-to-codearts
 
-# 作用: 把官方 lobehub/lobe-chat 的 main 同步到本 fork(upstream-mirror) 并推送到华为云 CodeArts main。
+# 作用: 把官方 lobehub/lobe-chat 的 main 单向同步到华为云 CodeArts main。
+#       方向: GitHub 官方(只读) -> CodeArts(只写)。不回写 fork, fork 上的这份
+#       workflow 文件只是让 Actions 有地方跑; 对 fork 本身零写入(无 push 权限需求,
+#       permissions 只需 read)。
+#
 #       custom 分支只在 CodeArts, 本流程不涉及; ECS 从 CodeArts 拉取构建推 custom。
 #
-# 与 nmw 的 sync-upstream-to-codearts.yml 同构, 仓库名/地址改为 lobehub。
+# 变化检测: 对比官方 main 与 CodeArts main 的 SHA(不用 upstream-mirror 标记分支,
+#           避免任何对 GitHub 的写操作)。
 #
 # 需在本 fork(ibmfashion/lobehub) Settings -> Secrets -> Actions 配置:
 #     CODEARTS_SSH_KEY  = SSH 私钥全文(含 BEGIN/END 行), 公钥已加到 CodeArts 个人设置->SSH密钥
 #     CODEARTS_LOBEHUB_SSH_URL = CodeArts lobehub 仓库 SSH 地址
-#   fork 侧 upstream-mirror 推送用内置 GITHUB_TOKEN(需 workflows 权限, 见 permissions)。
 
 on:
   schedule:
@@ -18,10 +22,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
-  # 官方 main 会改 .github/workflows 文件, GITHUB_TOKEN 推含 workflow 变更的
-  # 引用必须有 workflows 权限, 否则 advance fork mirror 一步被 remote rejected。
-  workflows: write
+  contents: read   # 只读 GitHub(不回写 fork), 不需要写权限
 
 concurrency:
   group: sync-lobehub-mirror
@@ -29,7 +30,6 @@ concurrency:
 
 env:
   UPSTREAM_URL: https://github.com/lobehub/lobe-chat.git
-  # CodeArts SSH 地址由 secret 配置(仓库建好后填入), 仓库名避免硬编码
   CODEARTS_SSH_HOST: codehub.devcloud.cn-east-3.huaweicloud.com
   UPSTREAM_BRANCH: main
 
@@ -49,9 +49,8 @@ jobs:
           git remote add upstream "${UPSTREAM_URL}"
           git fetch --tags upstream "${UPSTREAM_BRANCH}"
           NEW="$(git rev-parse upstream/${UPSTREAM_BRANCH})"
-          FORK="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          OLD="$(git ls-remote "$FORK" refs/heads/upstream-mirror | awk '{print $1}')"
-          echo "官方 main = ${NEW:0:12} ; 上次已镜像 = ${OLD:0:12}"
+          OLD="$(git ls-remote "${{ secrets.CODEARTS_LOBEHUB_SSH_URL }}" refs/heads/main | awk '{print $1}')"
+          echo "官方 main = ${NEW:0:12} ; CodeArts main = ${OLD:0:12}"
           if [ "$NEW" = "$OLD" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "无新 commit, 跳过。"
@@ -79,17 +78,6 @@ jobs:
           git push --force --tags "${{ secrets.CODEARTS_LOBEHUB_SSH_URL }}" \
             "upstream/${UPSTREAM_BRANCH}:refs/heads/main"
           echo "✅ 已把官方 ${{ steps.detect.outputs.sha }} 推送到 CodeArts main"
-
-      - name: Advance fork mirror marker (upstream-mirror)
-        # 放在 CodeArts 推送成功之后: 这个分支是"已同步"标记, 只有 CodeArts 真拿到代码才前进。
-        if: steps.detect.outputs.changed == 'true'
-        working-directory: work
-        run: |
-          # 只推分支内容, 不推 tags: 仅用于变化检测比对 SHA。推含 .github/workflows
-          # 变更的引用需要 workflows 权限(已在 permissions 里配置)。
-          git push --force \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
-            "upstream/${UPSTREAM_BRANCH}:refs/heads/upstream-mirror"
 
       - name: Summary
         if: steps.detect.outputs.changed == 'true'
